@@ -13,7 +13,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from bs4 import BeautifulSoup
-from google import genai  # 最新の google-genai SDK
+import google.generativeai as genai
 
 # ==========================================
 # ページ初期設定
