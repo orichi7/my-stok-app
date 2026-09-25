@@ -499,6 +499,27 @@ def confirm_delete_all_dialog():
         if st.button("キャンセル", key="dlg_del_all_cancel"):
             st.rerun()
 
+# ==========================================
+# 数値型安全変換ヘルパー関数
+# ==========================================
+def safe_int(val, default=1):
+    """文字列・float・None・カンマ混在の値を安全に整数(int)へ変換する"""
+    try:
+        if pd.isna(val) or val is None:
+            return default
+        return int(float(str(val).replace(",", "").strip()))
+    except (ValueError, TypeError):
+        return default
+
+def safe_float(val, default=0.0):
+    """文字列・None・カンマ混在の値を安全に浮動小数点数(float)へ変換する"""
+    try:
+        if pd.isna(val) or val is None:
+            return default
+        return float(str(val).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return default
+
 def render_tab3_content():
     """ TAB 3: 売買取引履歴の表示および編集・削除操作を描画・処理する関数 """
     st.subheader("📜 売買取引履歴")
@@ -549,15 +570,18 @@ def render_tab3_content():
                         type_idx = 0 if row_data["trade_type"] in ["買付", "現買", "買"] else 1
                         e_type = st.selectbox("取引区分", ["買付", "売却"], index=type_idx)
                         
-                        # None や空データが入っていてもエラーにならないようデフォルト値を指定
-                        raw_shares = row_data["shares"] if pd.notna(row_data["shares"]) else 1
-                        raw_price = row_data["price"] if pd.notna(row_data["price"]) else 0.0
-                        raw_fee = row_data["fee"] if pd.notna(row_data["fee"]) else 0.0
+                        # --------------------------------------------------
+                        # 【修正ポイント】安全な変換を通して値をセット
+                        # --------------------------------------------------
+                        shares_val = max(1, safe_int(row_data["shares"], default=1))
+                        price_val = max(0.0, safe_float(row_data["price"], default=0.0))
+                        fee_val = max(0.0, safe_float(row_data["fee"], default=0.0))
 
-                        e_shares = st.number_input("株数", min_value=1, value=max(1, int(raw_shares)))
-                        e_price = st.number_input("取引単価 (円)", min_value=0.0, value=max(0.0, float(raw_price)))
-                        e_fee = st.number_input("手数料 (円)", min_value=0.0, value=max(0.0, float(raw_fee)))
-                        
+                        e_shares = st.number_input("株数", min_value=1, value=shares_val)
+                        e_price = st.number_input("取引単価 (円)", min_value=0.0, value=price_val)
+                        e_fee = st.number_input("手数料 (円)", min_value=0.0, value=fee_val)
+                        # --------------------------------------------------
+
                         btn_update = st.form_submit_button("💾 変更を保存する", type="primary")
 
                         if btn_update:
