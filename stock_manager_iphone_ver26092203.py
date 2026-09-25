@@ -418,16 +418,37 @@ def fetch_stock_full_data(code, default_name=""):
     except Exception:
         return None
 
-def update_transaction(trans_id, code, name, trade_type, shares, price, fee, trade_date):
-    """指定したIDの取引履歴を更新する関数"""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE transactions 
-            SET code=?, name=?, trade_type=?, shares=?, price=?, fee=?, trade_date=?
-            WHERE id=?
-        """, (code, name, trade_type, shares, price, fee, str(trade_date), trans_id))
-        conn.commit()
+def update_transaction(target_id, e_date, e_code, e_name, e_type, e_shares, e_price, e_fee):
+    """ データベースの指定IDレコードを更新する関数 """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    query = """
+    UPDATE transactions 
+    SET trade_date = ?, 
+        code = ?, 
+        name = ?, 
+        trade_type = ?, 
+        shares = ?, 
+        price = ?, 
+        fee = ? 
+    WHERE id = ?
+    """
+    
+    # 引数・プレースホルダー(?)の順番を厳密に一致させる
+    cursor.execute(query, (
+        str(e_date),
+        str(e_code),
+        str(e_name),
+        str(e_type),
+        int(e_shares),
+        float(e_price),
+        float(e_fee),
+        int(target_id)  # WHERE節のid
+    ))
+    
+    conn.commit()
+    conn.close()
 
 def delete_transaction(trans_id):
     """指定したIDの取引履歴を1件削除する関数"""
@@ -443,30 +464,40 @@ def delete_all_transactions():
         cursor.execute("DELETE FROM transactions")
         conn.commit()
 
-@st.dialog("変更の確認")
-def confirm_save_dialog(trans_id, code, name, trade_type, shares, price, fee, trade_date):
-    """変更保存時の確認ダイアログ"""
-    st.write(f"ID **{trans_id}** の取引履歴を以下の内容で更新しますか？")
-    st.json({
-        "銘柄コード": code,
-        "銘柄名": name,
-        "取引種別": trade_type,
-        "数量": shares,
-        "単価": price,
-        "手数料": fee,
-        "取引日": str(trade_date)
-    })
+@st.dialog("💾 履歴変更の確認")
+def confirm_save_dialog(target_id, e_date, e_code, e_name, e_type, e_shares, e_price, e_fee):
+    """ 変更内容を確認してデータベースを更新するダイアログ """
+    st.write(f"ID **{target_id}** の内容を以下に変更しますか？")
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("更新を実行", type="primary", key="dlg_save_confirm"):
-            update_transaction(trans_id, code, name, trade_type, shares, price, fee, trade_date)
-            st.success("変更を保存しました。")
-            st.rerun()
+        st.write(f"・取引日: **{e_date}**")
+        st.write(f"・銘柄コード: **{e_code}**")
+        st.write(f"・銘柄名: **{e_name}**")
+        st.write(f"・取引区分: **{e_type}**")
     with col2:
-        if st.button("キャンセル", key="dlg_save_cancel"):
-            st.rerun()
+        st.write(f"・株数: **{e_shares}**")
+        st.write(f"・取引単価: **{e_price:,.1f} 円**")
+        st.write(f"・手数料: **{e_fee:,.1f} 円**")
 
+    st.markdown("---")
+    
+    col_act1, col_act2 = st.columns(2)
+    with col_act1:
+        if st.button("はい（更新）", type="primary", use_container_width=True):
+            # 1. データベースを更新
+            update_transaction(target_id, e_date, e_code, e_name, e_type, e_shares, e_price, e_fee)
+            
+            # 2. フラグを立てて再描画時にリセットさせる
+            st.session_state["selected_edit_id"] = None
+            st.session_state["reset_edit_id"] = True
+            
+            st.success(f"ID {target_id} を更新しました。")
+            st.rerun()
+            
+    with col_act2:
+        if st.button("キャンセル", use_container_width=True):
+            st.rerun()
 
 @st.dialog("選択履歴の削除確認")
 def confirm_delete_dialog(trans_id):
@@ -540,15 +571,40 @@ def render_tab3_content():
         tab3_op1, tab3_op2 = st.tabs(["✏️ 選択した履歴を編集", "🗑️ 履歴の削除"])
 
         with tab3_op1:
-            col_sel1, col_sel2 = st.columns([2, 1])
+            # --------------------------------------------------
+            # 【エラー回避処理】フォームを描画する「前」に初期化を完了させる
+            # --------------------------------------------------
+            if st.session_state.get("reset_edit_id", False):
+                st.session_state["edit_id_input"] = 1
+                st.session_state["reset_edit_id"] = False
+
+            if "edit_id_input" not in st.session_state:
+                st.session_state["edit_id_input"] = 1
+
+            col_sel1, col_sel2, col_sel3 = st.columns([2, 1, 1])
             with col_sel1:
-                edit_id = st.number_input("編集する履歴IDを入力", min_value=1, step=1, key="edit_id_input")
+                edit_id = st.number_input(
+                    "編集する履歴IDを入力", 
+                    min_value=1, 
+                    step=1, 
+                    key="edit_id_input"
+                )
             with col_sel2:
                 st.write("")
                 btn_select = st.button("🔍 選択した履歴を選択", key="btn_select_edit_id")
+            with col_sel3:
+                st.write("")
+                btn_clear = st.button("❌ 編集を解除", key="btn_clear_edit_id")
 
+            # ID選択時
             if btn_select:
                 st.session_state["selected_edit_id"] = edit_id
+
+            # 編集解除時（フラグを立てて再読み込み）
+            if btn_clear:
+                st.session_state["selected_edit_id"] = None
+                st.session_state["reset_edit_id"] = True
+                st.rerun()
 
             selected_id = st.session_state.get("selected_edit_id")
             if selected_id:
@@ -570,9 +626,6 @@ def render_tab3_content():
                         type_idx = 0 if row_data["trade_type"] in ["買付", "現買", "買"] else 1
                         e_type = st.selectbox("取引区分", ["買付", "売却"], index=type_idx)
                         
-                        # --------------------------------------------------
-                        # 【修正ポイント】安全な変換を通して値をセット
-                        # --------------------------------------------------
                         shares_val = max(1, safe_int(row_data["shares"], default=1))
                         price_val = max(0.0, safe_float(row_data["price"], default=0.0))
                         fee_val = max(0.0, safe_float(row_data["fee"], default=0.0))
@@ -580,7 +633,6 @@ def render_tab3_content():
                         e_shares = st.number_input("株数", min_value=1, value=shares_val)
                         e_price = st.number_input("取引単価 (円)", min_value=0.0, value=price_val)
                         e_fee = st.number_input("手数料 (円)", min_value=0.0, value=fee_val)
-                        # --------------------------------------------------
 
                         btn_update = st.form_submit_button("💾 変更を保存する", type="primary")
 
