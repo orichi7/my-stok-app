@@ -191,6 +191,47 @@ def analyze_news_with_gemini(stock_name, news_headlines, api_key):
         "reason": f"通信エラー: {last_error[:60]}"
     }
 
+def evaluate_stock_deal_with_gemini(data: dict, api_key: str) -> dict:
+    """ Gemini AI を活用し、当日株価のお得度（割安・押し目・買い時）を算出・評価する関数 """
+    if not api_key:
+        # APIキーがない場合はフォールバック評価
+        return {"deal_score": 50, "deal_label": "中立 (APIキー未設定)", "ai_comment": "APIキーが設定されていません。"}
+
+    prompt = f"""
+以下の銘柄情報（株価・テクニカル・財務指標）を分析し、「当日のお得度（割安感・絶好の買い時かどうか）」を判定してください。
+
+【銘柄情報】
+・銘柄名: {data['name']} ({data['code']})
+・現在株価: ¥{data['price']:,.1f}
+・25日移動平均乖離率: {data['deviation_rate']:+.1f}%
+・RSI(14日): {data['rsi14']:.1f}%
+・PER: {data['per']:.1f}倍 | ROE: {data['roe']:.1f}%
+・営業利益増益率: {data['earnings_growth']:+.1f}%
+・予想配当利回り: {data['div_yield']:.2f}%
+
+以下のJSONフォーマットのみで出力してください。余計な説明文は含めないでください。
+{{
+    "deal_score": 0から100の数値（お得感・買い時度が高いほど高得点）,
+    "deal_label": "★絶好のお得株" または "〇お買い得" または "△中立" または "×高値警戒",
+    "ai_comment": "当日株価のお得感・買い時理由を1~2文で簡潔に"
+}}
+"""
+
+    genai.configure(api_key=api_key)
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        return json.loads(response.text.strip())
+    except Exception as e:
+        return {
+            "deal_score": 50,
+            "deal_label": "判定エラー",
+            "ai_comment": f"AI診断エラー: {str(e)[:40]}"
+        }
+
 def render_gemini_diagnosis_section(api_key_input: str):
     """ Gemini AI ニュース統合リアルタイム個別診断を描画・実行する関数 """
     st.markdown("---")
@@ -797,79 +838,84 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1: おすすめ購入株・買い時診断
 # ==========================================
 with tab1:
-    st.subheader("🎯 市場別スクリーニング・おすすめ診断")
+    st.subheader("🎯 市場別 Gemini AI 当日お得株スクリーニング ＆ 買い時診断")
     
     col_m, col_btn = st.columns([2, 3])
     with col_m:
         market_choice = st.radio("対象市場を選択", ["プライム", "スタンダード", "グロース"], horizontal=True)
     with col_btn:
         st.write("")
-        run_screening = st.button("🔍 選択した市場でスクリーニング実行", type="primary")
+        run_screening = st.button("🤖 Gemini AI で当日お得株を抽出・診断", type="primary")
 
     if run_screening:
-        with st.spinner(f"【{market_choice}市場】売買代金上位銘柄を取得中..."):
-            target_items = get_top_stocks_by_trading_value(market_choice, top_n=25)
+        with st.spinner(f"【{market_choice}市場】売買代金上位銘柄を取得し、Gemini AIでお得株価を算出中..."):
+            target_items = get_top_stocks_by_trading_value(market_choice, top_n=20)
 
-        swing_candidates = []
-        income_candidates = []
-
-        progress_text = f"【{market_choice}市場】銘柄データを取得・診断中..."
+        candidates = []
+        progress_text = f"【{market_choice}市場】株価データを取得＆Gemini AI評価中..."
         my_bar = st.progress(0, text=progress_text)
 
+        total_count = len(target_items)
         for idx, (code, name) in enumerate(target_items, start=1):
-            my_bar.progress(idx / len(target_items), text=f"【{market_choice}】取得中 ({idx}/{len(target_items)}): {code} {name}")
+            my_bar.progress(idx / total_count, text=f"【{market_choice}】Gemini解析中 ({idx}/{total_count}): {code} {name}")
+            
             data = fetch_stock_full_data(code, default_name=name)
             if not data:
                 continue
 
             price = data["price"]
-            stop_loss_swing = min(price * 0.95, data["sma25"] * 0.98)
-            stop_loss_income = price * 0.93
+            stop_loss = min(price * 0.95, data["sma25"] * 0.98)
 
-            c1_val = (data["trading_value"] >= 300_000_000)
-            c1_sma = (price > data["sma25"])
-            c1_rsi = (40 <= data["rsi14"] <= 60)
-            c1_growth = (data["earnings_growth"] >= 10.0)
-            c1_per = (10.0 <= data["per"] <= 30.0)
+            # 1. 基礎的なテクニカル・ファンダメンタルズ条件の確認
+            c_sma = (price > data["sma25"])
+            c_rsi = (30 <= data["rsi14"] <= 65)  # 押し目〜過熱前の範囲
+            c_growth = (data["earnings_growth"] >= 10.0)
+            c_per = (0.0 < data["per"] <= 30.0)
 
-            ai_macro_score_swing = 1.5 if (c1_growth and c1_sma) else 0.0
-            swing_score = sum([c1_val, c1_sma, c1_rsi, c1_growth, c1_per]) + ai_macro_score_swing
+            # 2. Gemini AIによる「当日お得度（買い時度）」の算定
+            ai_eval = evaluate_stock_deal_with_gemini(data, api_key_input)
+            ai_score = ai_eval.get("deal_score", 50)
+            ai_label = ai_eval.get("deal_label", "中立")
+            ai_comment = ai_eval.get("ai_comment", "指標に基づくAI分析")
 
-            signal1 = "◎ 上昇トレンド" if c1_sma else "△ 様子見"
-            advice1 = f"目標:¥{price*1.04:,.0f} (RSI:{data['rsi14']:.1f}%, PER:{data['per']:.1f}倍)"
-            swing_candidates.append((swing_score, code, data["name"], f"①スイング({market_choice})", price, data["div_yield"], signal1, f"¥{stop_loss_swing:,.1f}", advice1))
+            # 3. テクニカル/業績の条件スコア + Gemini AIお得度スコアの算出
+            base_score = sum([c_sma, c_rsi, c_growth, c_per]) * 10  # 最大40点
+            total_deal_score = base_score + (ai_score * 0.6)        # 合計100点満点計算
 
-            c2_yield = (2.5 <= data["div_yield"] <= 5.0) if market_choice != "グロース" else (data["earnings_growth"] >= 15.0)
-            c2_equity = (data["equity_ratio"] >= 40.0)
-            c2_margin = (data["operating_margin"] >= 8.0)
-            c2_payout = (20.0 <= data["payout_ratio"] <= 60.0)
+            # 目的ラベル
+            strat_label = f"①スイング({market_choice})" if c_sma else f"②割安・長期({market_choice})"
 
-            ai_macro_score_income = 2.0 if (c2_yield and c2_equity and c2_margin) else 0.0
-            income_score = sum([c2_yield, c2_equity, c2_margin, c2_payout]) + ai_macro_score_income
-
-            strat_label = "②高成長・長期" if market_choice == "グロース" else "②配当・長期保有"
-            signal2 = "★ 優良財務" if ai_macro_score_income > 0 else ("〇 安定保有" if c2_yield else "△ 保留")
-            advice2 = f"利回り:{data['div_yield']:.2f}% (自己資本:{data['equity_ratio']:.0f}%, 営業益率:{data['operating_margin']:.1f}%)"
-            income_candidates.append((income_score, code, data["name"], strat_label, price, data["div_yield"], signal2, f"¥{stop_loss_income:,.1f}", advice2))
+            candidates.append({
+                "score": total_deal_score,
+                "code": code,
+                "name": data["name"],
+                "strategy": strat_label,
+                "price": f"¥{price:,.1f}",
+                "div_yield": f"{data['div_yield']:.2f}%" if data["div_yield"] > 0 else "---",
+                "ai_label": ai_label,
+                "ai_score": f"{ai_score}点",
+                "stop_loss": f"¥{stop_loss:,.1f}",
+                "reason": f"【AI判定】{ai_comment} (PER:{data['per']:.1f}倍, RSI:{data['rsi14']:.1f}%)"
+            })
 
         my_bar.empty()
 
-        swing_candidates.sort(key=lambda x: x[0], reverse=True)
-        income_candidates.sort(key=lambda x: x[0], reverse=True)
-        selected_items = swing_candidates[:5] + income_candidates[:5]
+        # 当日お得度・総合スコアが高い順にソートして上位10銘柄を抽出
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        selected_items = candidates[:10]
 
         res_data = []
         for item in selected_items:
-            _, code, s_name, strategy, price, div, signal, stop_loss_str, advice = item
             res_data.append({
-                "銘柄コード": code,
-                "銘柄名": s_name,
-                "推奨目的": strategy,
-                "現在株価": f"¥{price:,.1f}",
-                "予想配当利回り": f"{div:.2f}%" if div > 0 else "---",
-                "買い時判定": signal,
-                "損切ライン(目安)": stop_loss_str,
-                "判定理由 / スクリーニング根拠": advice
+                "銘柄コード": item["code"],
+                "銘柄名": item["name"],
+                "推奨目的": item["strategy"],
+                "現在株価": item["price"],
+                "予想配当利回り": item["div_yield"],
+                "Gemini AI お得度判定": item["ai_label"],
+                "AIお得スコア": item["ai_score"],
+                "損切ライン(目安)": item["stop_loss"],
+                "判定理由 / Gemini AI診断コメント": item["reason"]
             })
 
         st.session_state["screening_results"] = pd.DataFrame(res_data)
@@ -877,93 +923,8 @@ with tab1:
     if "screening_results" in st.session_state and not st.session_state["screening_results"].empty:
         st.dataframe(st.session_state["screening_results"], width="stretch")
 
-    st.markdown("---")
-    st.subheader("🤖 Gemini AI ニュース統合リアルタイム個別診断")
-    
-    col_diag_1, col_diag_2 = st.columns([1, 2])
-    with col_diag_1:
-        diag_code = st.text_input("銘柄コードを入力 (例: 7203)", key="diag_code_input")
-        btn_run_diag = st.button("🤖 Gemini AI 診断を実行")
-
-    if btn_run_diag and diag_code:
-        with st.spinner(f"銘柄 {diag_code} のデータ取得＆Gemini AI ニュース解析中..."):
-            tse_stocks = get_tse_stock_list()
-            info = tse_stocks.get(diag_code, {})
-            default_name = info.get("name", "") if isinstance(info, dict) else str(info)
-
-            data = fetch_stock_full_data(diag_code, default_name=default_name)
-            if not data:
-                st.error(f"銘柄コード {diag_code} の株価データを取得できませんでした。")
-            else:
-                stock_name = data["name"]
-                price = data["price"]
-
-                news_headlines = fetch_latest_stock_news(diag_code, stock_name)
-                ai_res = analyze_news_with_gemini(stock_name, news_headlines, api_key_input)
-
-                f_growth = data["earnings_growth"] >= 10.0
-                f_roe = data["roe"] >= 8.0
-                f_per = 0.0 < data["per"] <= 15.0
-                f_mcap = data["market_cap"] >= 100.0
-                fundamentals_pass = f_growth and f_roe and f_per and f_mcap
-
-                t_rsi = data["rsi14"] <= 40.0
-                t_dev = data["deviation_rate"] <= -10.0
-                technical_pass = t_rsi and t_dev
-
-                sentiment_score = ai_res.get("sentiment_score", 0)
-                ai_category = ai_res.get("category", "分類不能")
-                ai_reason = ai_res.get("reason", "判定結果を取得できませんでした。")
-
-                base_score = 50
-                if fundamentals_pass: base_score += 20
-                if technical_pass: base_score += 20
-
-                total_score = base_score + (sentiment_score * 0.3)
-
-                if sentiment_score <= -50:
-                    signal = "⚠️ 危険・買わないこと"
-                    eval_msg = "最新ニュースに重大な悪材料や不祥事が検知されました。買わないことを推奨します。"
-                elif total_score >= 80:
-                    signal = "★ 絶好の買い場 (Sランク)"
-                    eval_msg = "業績・テクニカル指標に加えて、最新ニュースも非常に好材料を示しています！"
-                elif total_score >= 60:
-                    signal = "〇 買い検討可能 (Aランク)"
-                    eval_msg = "全体的に好条件が揃っています。"
-                elif total_score >= 40:
-                    signal = "△ 様子見推奨 (Bランク)"
-                    eval_msg = "業績またはタイミングにやや難があるか、材料が限定的です。"
-                else:
-                    signal = "× 買い見送り (Cランク)"
-                    eval_msg = "設定した投資基準を満たしていません。"
-
-                suggested_stop_loss = min(price * 0.95, data["sma25"] * 0.98)
-
-                st.success(f"**{stock_name} ({diag_code}) の診断結果**")
-                
-                m1, m2, m3 = st.columns(3)
-                m1.metric("総合判定", signal)
-                m2.metric("総合スコア", f"{total_score:.0f} 点")
-                m3.metric("現在株価", f"¥{price:,.1f}")
-
-                st.info(f"**判定要約:** {eval_msg}")
-
-                st.markdown(f"""
-                ### 🤖 Gemini AI ニュース感情分析
-                - **ニュース分類**: {ai_category} (感情スコア: {sentiment_score:+d})
-                - **AI分析理由**: {ai_reason}
-
-                ---
-                ### 📊 ファンダメンタルズ判定 ({'合格' if fundamentals_pass else '要確認'})
-                - **営業利益変化率**: {data['earnings_growth']:+.1f}%
-                - **ROE**: {data['roe']:.1f}% | **PER**: {data['per']:.1f}倍
-
-                ---
-                ### 📈 テクニカル / 株価目安
-                - **RSI (14日)**: {data['rsi14']:.1f}% | **25日乖離率**: {data['deviation_rate']:+.1f}%
-                - **推奨損切ライン**: ¥{suggested_stop_loss:,.1f} 付近
-                - **目標**:¥{price*1.04:,.0f} **(RSI**:{data['rsi14']:.1f}%, **PER**:{data['per']:.1f}倍 **)**
-                """)
+    # 個別銘柄のリアルタイム詳細診断セクションの描画
+    render_gemini_diagnosis_section(api_key_input)
 
 # ==========================================
 # TAB 2: 保有銘柄一覧・資産状況
