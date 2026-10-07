@@ -15,6 +15,11 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 import google.generativeai as genai
 
+import time
+
+
+
+
 # ==========================================
 # ページ初期設定 ＆ モバイル最適化CSS
 # ==========================================
@@ -192,10 +197,9 @@ def analyze_news_with_gemini(stock_name, news_headlines, api_key):
     }
 
 def evaluate_stock_deal_with_gemini(data: dict, api_key: str) -> dict:
-    """ Gemini AI を活用し、当日株価のお得度（割安・押し目・買い時）を算出・評価する関数 """
+    """ Gemini AI を活用し、当日株価のお得度（割安・押し目・買い時）を算出・評価する関数（フォールバック機能付き） """
     if not api_key:
-        # APIキーがない場合はフォールバック評価
-        return {"deal_score": 50, "deal_label": "中立 (APIキー未設定)", "ai_comment": "APIキーが設定されていません。"}
+        return {"deal_score": 50, "deal_label": "APIキー未設定", "ai_comment": "サイドバーでGemini APIキーを設定してください。"}
 
     prompt = f"""
 以下の銘柄情報（株価・テクニカル・財務指標）を分析し、「当日のお得度（割安感・絶好の買い時かどうか）」を判定してください。
@@ -209,7 +213,7 @@ def evaluate_stock_deal_with_gemini(data: dict, api_key: str) -> dict:
 ・営業利益増益率: {data['earnings_growth']:+.1f}%
 ・予想配当利回り: {data['div_yield']:.2f}%
 
-以下のJSONフォーマットのみで出力してください。余計な説明文は含めないでください。
+以下のJSONフォーマットのみで出力してください。他の文章は一切含めないでください。
 {{
     "deal_score": 0から100の数値（お得感・買い時度が高いほど高得点）,
     "deal_label": "★絶好のお得株" または "〇お買い得" または "△中立" または "×高値警戒",
@@ -218,19 +222,36 @@ def evaluate_stock_deal_with_gemini(data: dict, api_key: str) -> dict:
 """
 
     genai.configure(api_key=api_key)
+
+    # 利用可能なモデル候補の動的生成
+    candidate_models = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp"]
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        return json.loads(response.text.strip())
-    except Exception as e:
-        return {
-            "deal_score": 50,
-            "deal_label": "判定エラー",
-            "ai_comment": f"AI診断エラー: {str(e)[:40]}"
-        }
+        available_models = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        flash_models = [m for m in available_models if "flash" in m]
+        if flash_models:
+            candidate_models = flash_models + [m for m in available_models if m not in flash_models]
+    except Exception:
+        pass
+
+    last_error = ""
+    for model_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            raw_text = response.text.strip()
+            return json.loads(raw_text)
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    return {
+        "deal_score": 50,
+        "deal_label": "判定エラー",
+        "ai_comment": f"通信エラー: {last_error[:50]}"
+    }
 
 def render_gemini_diagnosis_section(api_key_input: str):
     """ Gemini AI ニュース統合リアルタイム個別診断を描画・実行する関数 """
@@ -866,23 +887,25 @@ with tab1:
             price = data["price"]
             stop_loss = min(price * 0.95, data["sma25"] * 0.98)
 
-            # 1. 基礎的なテクニカル・ファンダメンタルズ条件の確認
+            # 1. 基礎的なテクニカル・ファンダメンタルズ条件
             c_sma = (price > data["sma25"])
-            c_rsi = (30 <= data["rsi14"] <= 65)  # 押し目〜過熱前の範囲
+            c_rsi = (30 <= data["rsi14"] <= 65)
             c_growth = (data["earnings_growth"] >= 10.0)
             c_per = (0.0 < data["per"] <= 30.0)
 
-            # 2. Gemini AIによる「当日お得度（買い時度）」の算定
+            # 2. Gemini AIによる「当日お得度」の算定
             ai_eval = evaluate_stock_deal_with_gemini(data, api_key_input)
             ai_score = ai_eval.get("deal_score", 50)
             ai_label = ai_eval.get("deal_label", "中立")
             ai_comment = ai_eval.get("ai_comment", "指標に基づくAI分析")
 
-            # 3. テクニカル/業績の条件スコア + Gemini AIお得度スコアの算出
-            base_score = sum([c_sma, c_rsi, c_growth, c_per]) * 10  # 最大40点
-            total_deal_score = base_score + (ai_score * 0.6)        # 合計100点満点計算
+            # ★ API制限（429エラー）回避のための1秒待機
+            time.sleep(1)
 
-            # 目的ラベル
+            # 3. 条件スコア + Gemini AIお得度スコアの算出
+            base_score = sum([c_sma, c_rsi, c_growth, c_per]) * 10
+            total_deal_score = base_score + (ai_score * 0.6)
+
             strat_label = f"①スイング({market_choice})" if c_sma else f"②割安・長期({market_choice})"
 
             candidates.append({
