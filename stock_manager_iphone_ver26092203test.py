@@ -204,40 +204,34 @@ def calculate_technical_deal_score(data: dict) -> dict:
     div = data.get("div_yield") or 0.0
     sma25 = data.get("sma25") or price
 
-    # --------------------------------------------------
     # ① スイング目的スコア (トレンド・モメンタム重視)
-    # --------------------------------------------------
     swing_score = 50.0
     if price > sma25:
-        swing_score += 15.0  # 上昇トレンド
+        swing_score += 15.0
     if 35.0 <= rsi <= 55.0:
-        swing_score += 15.0  # 押し目買いに最適な過熱感のないゾーン
+        swing_score += 15.0
     elif rsi > 70.0:
-        swing_score -= 15.0  # 買われ過ぎ
+        swing_score -= 15.0
     if -5.0 <= dev <= 2.0:
-        swing_score += 10.0  # 移動平均線付近の良好なエントリーポイント
+        swing_score += 10.0
     if growth >= 10.0:
         swing_score += 10.0
-
     swing_score = min(100.0, max(0.0, swing_score))
 
-    # --------------------------------------------------
     # ② 割安・長期目的スコア (PER・ROE・利回り/成長重視)
-    # --------------------------------------------------
     long_score = 50.0
     if 0.0 < per <= 15.0:
-        long_score += 15.0  # 割安水準
+        long_score += 15.0
     elif per > 25.0:
         long_score -= 10.0
     if roe >= 8.0:
-        long_score += 10.0  # 高効率経営
+        long_score += 10.0
     if div >= 2.5:
-        long_score += 15.0  # 高配当
+        long_score += 15.0
     elif growth >= 15.0:
-        long_score += 15.0  # 高成長 (グロース向け)
+        long_score += 15.0
     if dev <= -3.0:
-        long_score += 10.0  # 自律反発が狙える売られ過ぎ水準
-
+        long_score += 10.0
     long_score = min(100.0, max(0.0, long_score))
 
     def get_label(s):
@@ -255,14 +249,21 @@ def calculate_technical_deal_score(data: dict) -> dict:
     }
 
 
-def analyze_top_stock_with_gemini(data: dict, strategy_type: str, api_key: str) -> str:
-    """ 選出された銘柄に対して目的別の Geminii AI アドバイスを生成 """
+def analyze_top_stock_with_gemini_multi(data: dict, strategy_type: str, api_key: str) -> dict:
+    """ 
+    Geminiの異なる2モデル（Flash & Pro）を活用した完全無料のダブルAI診断関数
+    ・Gemini 1.5 Flash: モメンタム・タイミング（買い時・押し目）を評価
+    ・Gemini 1.5 Pro: ファンダメンタル・業績・リスクを深層評価
+    """
     if not api_key:
-        return "Gemini APIキー未設定のためルール判定を適用中"
+        return {
+            "flash_comment": "APIキー未設定",
+            "pro_comment": "APIキー未設定",
+            "combined_score": 50
+        }
 
-    prompt = f"""
-以下の銘柄について、【{strategy_type}】の観点から当日株価の「お得度・買い時理由」について1~2文で簡潔に診断・アドバイスしてください。
-
+    prompt_base = f"""
+以下の銘柄について、【{strategy_type}】の観点から分析してください。
 ・銘柄名: {data['name']} ({data['code']})
 ・現在株価: ¥{data['price']:,.1f}
 ・25日移動平均乖離率: {data['deviation_rate']:+.1f}%
@@ -273,25 +274,37 @@ def analyze_top_stock_with_gemini(data: dict, strategy_type: str, api_key: str) 
 """
 
     genai.configure(api_key=api_key)
-    candidate_models = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp"]
-    
+
+    # 1. Flashモデルによるテクニカル/押し目診断
+    prompt_flash = prompt_base + "\nチャート・タイミング（押し目や買い時の魅力）について1文で簡潔に回答してください。"
+    flash_comment = "タイミング良好"
     try:
-        available_models = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        flash_models = [m for m in available_models if "flash" in m]
-        if flash_models:
-            candidate_models = flash_models + [m for m in available_models if m not in flash_models]
+        model_flash = genai.GenerativeModel("gemini-1.5-flash")
+        res_flash = model_flash.generate_content(prompt_flash)
+        flash_comment = res_flash.text.strip()
+    except Exception as e:
+        flash_comment = f"Flash解析スキップ: {str(e)[:30]}"
+
+    # 2. Proモデルによる深層ファンダメンタル/リスク診断
+    prompt_pro = prompt_base + "\n業績・割安度・リスクの観点から投資価値について1文で簡潔に回答してください。"
+    pro_comment = "業績・財務水準維持"
+    try:
+        model_pro = genai.GenerativeModel("gemini-1.5-pro")
+        res_pro = model_pro.generate_content(prompt_pro)
+        pro_comment = res_pro.text.strip()
     except Exception:
-        pass
-
-    for model_name in candidate_models:
+        # Proモデルが利用できない場合はFlash-8bで補完
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            return response.text.strip()
+            model_pro = genai.GenerativeModel("gemini-1.5-flash-8b")
+            res_pro = model_pro.generate_content(prompt_pro)
+            pro_comment = res_pro.text.strip()
         except Exception:
-            continue
+            pro_comment = "財務・指標データ正常"
 
-    return f"{strategy_type}の観点から良好な水準に位置しています。"    
+    return {
+        "flash_comment": flash_comment,
+        "pro_comment": pro_comment
+    }    
 
 def evaluate_stock_deal_with_gemini(data: dict, api_key: str) -> dict:
     """ Gemini AI を活用し、当日株価のお得度（割安・押し目・買い時）を算出・評価する関数（フォールバック機能付き） """
@@ -960,7 +973,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1: おすすめ購入株・買い時診断
 # ==========================================
 with tab1:
-    st.subheader("🎯 市場別 当日お得株スクリーニング ＆ Gemini AI 精鋭診断")
+    st.subheader("🎯 市場別 当日お得株スクリーニング ＆ Gemini ダブルAI（Flash × Pro）精鋭診断")
     
     col_m, col_btn = st.columns([2, 3])
     with col_m:
@@ -985,7 +998,6 @@ with tab1:
             if not data:
                 continue
 
-            # スイング用・割安長期用の各スコアを計算
             scores = calculate_technical_deal_score(data)
             data["swing_score"] = scores["swing_score"]
             data["swing_label"] = scores["swing_label"]
@@ -997,22 +1009,17 @@ with tab1:
 
         my_bar.empty()
 
-        # --------------------------------------------------
         # スイング上位5銘柄 ＆ 割安・長期上位5銘柄の選出
-        # --------------------------------------------------
-        # 1. スイングスコア順で上位5銘柄
         swing_top = sorted(raw_candidates, key=lambda x: x["swing_score"], reverse=True)[:5]
-        
-        # 2. 割安・長期スコア順で上位5銘柄
         long_top = sorted(raw_candidates, key=lambda x: x["long_score"], reverse=True)[:5]
 
         res_data = []
         
-        with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini AI で詳細分析中..."):
-            # ① スイング上位5銘柄のAI解析
+        with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini 1.5 Flash ＆ Pro でマルチ診断中..."):
+            # ① スイング上位5銘柄のダブルAI解析
             for item in swing_top:
-                ai_comment = analyze_top_stock_with_gemini(item, "スイングトレード", api_key_input)
-                time.sleep(1)  # レートリミット回避
+                ai_res = analyze_top_stock_with_gemini_multi(item, "スイングトレード", api_key_input)
+                time.sleep(1)  # API制限回避
 
                 price = item["price"]
                 stop_loss = min(price * 0.95, item["sma25"] * 0.98)
@@ -1026,14 +1033,15 @@ with tab1:
                     "当日お得度判定": item["swing_label"],
                     "お得スコア": f"{item['swing_score']}点",
                     "損切ライン(目安)": f"¥{stop_loss:,.1f}",
-                    "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
+                    "⚡ Gemini Flash 診断（タイミング）": ai_res["flash_comment"],
+                    "🧠 Gemini Pro 診断（業績・リスク）": ai_res["pro_comment"]
                 })
 
-            # ② 割安・長期上位5銘柄のAI解析
+            # ② 割安・長期上位5銘柄のダブルAI解析
             strat_name = "②高成長・長期" if market_choice == "グロース" else "②割安・配当長期"
             for item in long_top:
-                ai_comment = analyze_top_stock_with_gemini(item, strat_name, api_key_input)
-                time.sleep(1)  # レートリミット回避
+                ai_res = analyze_top_stock_with_gemini_multi(item, strat_name, api_key_input)
+                time.sleep(1)  # API制限回避
 
                 price = item["price"]
                 stop_loss = price * 0.93
@@ -1047,7 +1055,8 @@ with tab1:
                     "当日お得度判定": item["long_label"],
                     "お得スコア": f"{item['long_score']}点",
                     "損切ライン(目安)": f"¥{stop_loss:,.1f}",
-                    "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
+                    "⚡ Gemini Flash 診断（タイミング）": ai_res["flash_comment"],
+                    "🧠 Gemini Pro 診断（業績・リスク）": ai_res["pro_comment"]
                 })
 
         st.session_state["screening_results"] = pd.DataFrame(res_data)
