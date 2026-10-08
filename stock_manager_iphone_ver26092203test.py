@@ -499,16 +499,20 @@ def get_tse_stock_list():
 
 @st.cache_data(ttl=3600)
 def get_top_stocks_by_trading_value(market_name: str, top_n: int = 25):
-    """ 指定市場の中で直近の売買代金（株価×出来高）が高い上位N銘柄を取得する """
+    """ 指定市場の中で直近の売買代金（株価×出来高）が高い上位N銘柄を取得する（表記揺れ吸収対応） """
     tse_stocks = get_tse_stock_list()
     
-    # 対象市場の銘柄のみ抽出
-    filtered = {
-        code: info.get("name", "") if isinstance(info, dict) else str(info)
-        for code, info in tse_stocks.items()
-        if market_name in (info.get("market", "") if isinstance(info, dict) else "")
-    }
-    
+    # 市場名の判定（「スタンダードTOP20」や「スタンダード（内国株）」などの表記揺れに対応）
+    filtered = {}
+    for code, info in tse_stocks.items():
+        m_info = info.get("market", "") if isinstance(info, dict) else ""
+        s_name = info.get("name", "") if isinstance(info, dict) else str(info)
+        
+        # 選択された市場キーワード（例: "スタンダード"）が含まれているか判定
+        if market_name in m_info:
+            filtered[code] = s_name
+
+    # 該当銘柄が存在しない場合は空リストを返して処理中断
     if not filtered:
         return []
 
@@ -518,20 +522,20 @@ def get_top_stocks_by_trading_value(market_name: str, top_n: int = 25):
     try:
         # yfinanceで直近1日のデータを取り一括で売買代金を算出
         data = yf.download(all_tickers, period="1d", progress=False)
-        if data.empty:
+        if data.empty or 'Close' not in data:
             return list(filtered.items())[:top_n]
             
         latest_close = data['Close'].iloc[-1]
         latest_volume = data['Volume'].iloc[-1]
         trading_value = latest_close * latest_volume
         
-        # 売買代金が高い順にソート
+        # 売買代金が高い順にソート（NaN除外）
         sorted_tickers = trading_value.dropna().sort_values(ascending=False).index.tolist()
         
         top_items = [ticker_to_code[t] for t in sorted_tickers if t in ticker_to_code][:top_n]
         return top_items
     except Exception:
-        # エラー時のフォールバック
+        # ネットワークエラー等の場合の安全なフォールバック
         return list(filtered.items())[:top_n]
 
 def fetch_stock_full_data(code, default_name=""):
