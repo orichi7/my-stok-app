@@ -987,7 +987,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1: おすすめ購入株・買い時診断
 # ==========================================
 with tab1:
-    st.subheader("🎯 市場別 当日お得株スクリーニング ＆ Gemini AI 精鋭診断")
+    st.subheader("🎯 市場別 当日お得株スクリーニング ＆ Gemini ダブルAI（Flash × Pro）精鋭診断")
     
     col_m, col_btn = st.columns([2, 3])
     with col_m:
@@ -1012,7 +1012,6 @@ with tab1:
             if not data:
                 continue
 
-            # スイング用・割安長期用の各スコアを計算
             scores = calculate_technical_deal_score(data)
             data["swing_score"] = scores["swing_score"]
             data["swing_label"] = scores["swing_label"]
@@ -1025,23 +1024,23 @@ with tab1:
         my_bar.empty()
 
         # --------------------------------------------------
-        # スイング上位5銘柄 ＆ 割安・長期上位5銘柄の選出
+        # スイング上位5銘柄 ＆ 割安・長期上位5銘柄の厳密選出
         # --------------------------------------------------
-        # 1. スイングスコア順で上位5銘柄
+        # 1. スイングスコア順で上位5銘柄を抽出
         swing_top = sorted(raw_candidates, key=lambda x: x["swing_score"], reverse=True)[:5]
         
-        # 2. 割安・長期スコア順で上位5銘柄
+        # 2. 割安・長期スコア順で上位5銘柄を抽出
         long_top = sorted(raw_candidates, key=lambda x: x["long_score"], reverse=True)[:5]
 
+        # 表示用リストを新規初期化（過去データの混入を防止）
         res_data = []
         
         with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini 1.5 Flash ＆ Pro でマルチ診断中..."):
-            # ① スイング上位5銘柄のダブルAI解析
+            # ① スイング上位5銘柄のダブルAI解析 (5件)
             for item in swing_top:
                 ai_res = analyze_top_stock_with_gemini_multi(item, "スイングトレード", api_key_input)
                 time.sleep(1)  # API制限回避
 
-                # ★ ai_res（辞書型）からコメント文字列を作成
                 flash_msg = ai_res.get("flash_comment", "")
                 pro_msg = ai_res.get("pro_comment", "")
                 ai_comment = f"【Flash】{flash_msg} / 【Pro】{pro_msg}"
@@ -1061,13 +1060,12 @@ with tab1:
                     "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
                 })
 
-            # ② 割安・長期上位5銘柄のダブルAI解析
+            # ② 割安・長期上位5銘柄のダブルAI解析 (5件)
             strat_name = "②高成長・長期" if market_choice == "グロース" else "②割安・配当長期"
             for item in long_top:
                 ai_res = analyze_top_stock_with_gemini_multi(item, strat_name, api_key_input)
                 time.sleep(1)  # API制限回避
 
-                # ★ ai_res（辞書型）からコメント文字列を作成
                 flash_msg = ai_res.get("flash_comment", "")
                 pro_msg = ai_res.get("pro_comment", "")
                 ai_comment = f"【Flash】{flash_msg} / 【Pro】{pro_msg}"
@@ -1087,27 +1085,7 @@ with tab1:
                     "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
                 })
 
-            # ② 割安・長期上位5銘柄のAI解析
-            strat_name = "②高成長・長期" if market_choice == "グロース" else "②割安・配当長期"
-            for item in long_top:
-                ai_res = analyze_top_stock_with_gemini_multi(item, strat_name, api_key_input)
-                time.sleep(1)  # レートリミット回避
-
-                price = item["price"]
-                stop_loss = price * 0.93
-
-                res_data.append({
-                    "銘柄コード": item["code"],
-                    "銘柄名": item["name"],
-                    "推奨目的": f"{strat_name}({market_choice})",
-                    "現在株価": f"¥{price:,.1f}",
-                    "予想配当利回り": f"{item['div_yield']:.2f}%" if item["div_yield"] > 0 else "---",
-                    "当日お得度判定": item["long_label"],
-                    "お得スコア": f"{item['long_score']}点",
-                    "損切ライン(目安)": f"¥{stop_loss:,.1f}",
-                    "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
-                })
-
+        # セッション状態を更新（毎回10件にリセット）
         st.session_state["screening_results"] = pd.DataFrame(res_data)
 
     if "screening_results" in st.session_state and not st.session_state["screening_results"].empty:
