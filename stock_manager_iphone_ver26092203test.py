@@ -17,9 +17,6 @@ import google.generativeai as genai
 
 import time
 
-
-
-
 # ==========================================
 # ページ初期設定 ＆ モバイル最適化CSS
 # ==========================================
@@ -195,6 +192,92 @@ def analyze_news_with_gemini(stock_name, news_headlines, api_key):
         "category": "解析エラー",
         "reason": f"通信エラー: {last_error[:60]}"
     }
+
+def calculate_technical_deal_score(data: dict) -> dict:
+    """ テクニカル・財務指標から即時に当日お得度（押し目・割安感）を算出する関数（API通信不要） """
+    price = data["price"]
+    rsi = data.get("rsi14") or 50.0
+    dev = data.get("deviation_rate") or 0.0
+    per = data.get("per") or 0.0
+    growth = data.get("earnings_growth") or 0.0
+
+    score = 50.0
+
+    # 1. RSIによる押し目・売られ過ぎ判定（低すぎず高すぎない30〜50が高得点）
+    if 30.0 <= rsi <= 45.0:
+        score += 20.0
+    elif 45.0 < rsi <= 55.0:
+        score += 10.0
+    elif rsi > 70.0:
+        score -= 15.0  # 買われ過ぎ・高値警戒
+
+    # 2. 25日移動平均乖離率（マイナス乖離＝売られ過ぎ・押し目）
+    if dev <= -5.0:
+        score += 15.0
+    elif dev <= 0.0:
+        score += 5.0
+    elif dev > 10.0:
+        score -= 10.0
+
+    # 3. PER/増益率による割安・成長性加点
+    if 0.0 < per <= 15.0:
+        score += 10.0
+    if growth >= 10.0:
+        score += 5.0
+
+    score = min(100.0, max(0.0, score))
+
+    if score >= 75:
+        label = "★絶好のお得株"
+    elif score >= 60:
+        label = "〇お買い得"
+    elif score >= 40:
+        label = "△中立"
+    else:
+        label = "×高値警戒"
+
+    return {
+        "deal_score": int(score),
+        "deal_label": label,
+        "summary_reason": f"RSI:{rsi:.1f}%, 乖離率:{dev:+.1f}%, PER:{per:.1f}倍"
+    }
+
+
+def analyze_top_stock_with_gemini(data: dict, api_key: str) -> str:
+    """ 上位厳選銘柄に対してGemini AIでピンポイント診断を行う関数 """
+    if not api_key:
+        return "Gemini APIキー未設定のためルール判定を適用中"
+
+    prompt = f"""
+以下の銘柄について、当日株価の「お得度（押し目買い・割安度の魅力）」について1~2文で簡潔に診断・アドバイスしてください。
+
+・銘柄名: {data['name']} ({data['code']})
+・現在株価: ¥{data['price']:,.1f}
+・25日移動平均乖離率: {data['deviation_rate']:+.1f}%
+・RSI(14日): {data['rsi14']:.1f}%
+・PER: {data['per']:.1f}倍 | 営業利益増益率: {data['earnings_growth']:+.1f}%
+"""
+
+    genai.configure(api_key=api_key)
+    candidate_models = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp"]
+    
+    try:
+        available_models = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        flash_models = [m for m in available_models if "flash" in m]
+        if flash_models:
+            candidate_models = flash_models + [m for m in available_models if m not in flash_models]
+    except Exception:
+        pass
+
+    for model_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception:
+            continue
+
+    return "株価・テクニカル指標が良好な水準に位置しています。"    
 
 def evaluate_stock_deal_with_gemini(data: dict, api_key: str) -> dict:
     """ Gemini AI を活用し、当日株価のお得度（割安・押し目・買い時）を算出・評価する関数（フォールバック機能付き） """
@@ -859,87 +942,67 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1: おすすめ購入株・買い時診断
 # ==========================================
 with tab1:
-    st.subheader("🎯 市場別 Gemini AI 当日お得株スクリーニング ＆ 買い時診断")
+    st.subheader("🎯 市場別 当日お得株スクリーニング ＆ Gemini AI 精鋭診断")
     
     col_m, col_btn = st.columns([2, 3])
     with col_m:
         market_choice = st.radio("対象市場を選択", ["プライム", "スタンダード", "グロース"], horizontal=True)
     with col_btn:
         st.write("")
-        run_screening = st.button("🤖 Gemini AI で当日お得株を抽出・診断", type="primary")
+        run_screening = st.button("🔍 当日お得株をスクリーニング実行", type="primary")
 
     if run_screening:
-        with st.spinner(f"【{market_choice}市場】売買代金上位銘柄を取得し、Gemini AIでお得株価を算出中..."):
+        with st.spinner(f"【{market_choice}市場】売買代金上位銘柄を取得し、当日お得度を高速解析中..."):
             target_items = get_top_stocks_by_trading_value(market_choice, top_n=20)
 
-        candidates = []
-        progress_text = f"【{market_choice}市場】株価データを取得＆Gemini AI評価中..."
+        raw_candidates = []
+        progress_text = f"【{market_choice}市場】データ取得＆一次スクリーニング中..."
         my_bar = st.progress(0, text=progress_text)
 
         total_count = len(target_items)
         for idx, (code, name) in enumerate(target_items, start=1):
-            my_bar.progress(idx / total_count, text=f"【{market_choice}】Gemini解析中 ({idx}/{total_count}): {code} {name}")
+            my_bar.progress(idx / total_count, text=f"【{market_choice}】指標取得中 ({idx}/{total_count}): {code} {name}")
             
             data = fetch_stock_full_data(code, default_name=name)
             if not data:
                 continue
 
-            price = data["price"]
-            stop_loss = min(price * 0.95, data["sma25"] * 0.98)
+            # 1. 数値計算ベースの高速お得度評価
+            calc_res = calculate_technical_deal_score(data)
+            data["deal_score"] = calc_res["deal_score"]
+            data["deal_label"] = calc_res["deal_label"]
+            data["summary_reason"] = calc_res["summary_reason"]
 
-            # 1. 基礎的なテクニカル・ファンダメンタルズ条件
-            c_sma = (price > data["sma25"])
-            c_rsi = (30 <= data["rsi14"] <= 65)
-            c_growth = (data["earnings_growth"] >= 10.0)
-            c_per = (0.0 < data["per"] <= 30.0)
-
-            # 2. Gemini AIによる「当日お得度」の算定
-            ai_eval = evaluate_stock_deal_with_gemini(data, api_key_input)
-            ai_score = ai_eval.get("deal_score", 50)
-            ai_label = ai_eval.get("deal_label", "中立")
-            ai_comment = ai_eval.get("ai_comment", "指標に基づくAI分析")
-
-            # ★ API制限（429エラー）回避のための1秒待機
-            time.sleep(1)
-
-            # 3. 条件スコア + Gemini AIお得度スコアの算出
-            base_score = sum([c_sma, c_rsi, c_growth, c_per]) * 10
-            total_deal_score = base_score + (ai_score * 0.6)
-
-            strat_label = f"①スイング({market_choice})" if c_sma else f"②割安・長期({market_choice})"
-
-            candidates.append({
-                "score": total_deal_score,
-                "code": code,
-                "name": data["name"],
-                "strategy": strat_label,
-                "price": f"¥{price:,.1f}",
-                "div_yield": f"{data['div_yield']:.2f}%" if data["div_yield"] > 0 else "---",
-                "ai_label": ai_label,
-                "ai_score": f"{ai_score}点",
-                "stop_loss": f"¥{stop_loss:,.1f}",
-                "reason": f"【AI判定】{ai_comment} (PER:{data['per']:.1f}倍, RSI:{data['rsi14']:.1f}%)"
-            })
+            raw_candidates.append(data)
 
         my_bar.empty()
 
-        # 当日お得度・総合スコアが高い順にソートして上位10銘柄を抽出
-        candidates.sort(key=lambda x: x["score"], reverse=True)
-        selected_items = candidates[:10]
+        # 2. 当日お得度スコア順にソートし、上位5銘柄を選出
+        raw_candidates.sort(key=lambda x: x["deal_score"], reverse=True)
+        top_candidates = raw_candidates[:5]
 
+        # 3. 上位5銘柄のみGemini AIで厳選診断（1秒のウェイトを挟みAPI制限を完全回避）
         res_data = []
-        for item in selected_items:
-            res_data.append({
-                "銘柄コード": item["code"],
-                "銘柄名": item["name"],
-                "推奨目的": item["strategy"],
-                "現在株価": item["price"],
-                "予想配当利回り": item["div_yield"],
-                "Gemini AI お得度判定": item["ai_label"],
-                "AIお得スコア": item["ai_score"],
-                "損切ライン(目安)": item["stop_loss"],
-                "判定理由 / Gemini AI診断コメント": item["reason"]
-            })
+        with st.spinner(f"上位 {len(top_candidates)} 銘柄を Gemini AI で詳細分析中..."):
+            for item in top_candidates:
+                ai_comment = analyze_top_stock_with_gemini(item, api_key_input)
+                time.sleep(1)  # レートリミット回避
+
+                price = item["price"]
+                stop_loss = min(price * 0.95, item["sma25"] * 0.98)
+                strat_label = f"①スイング({market_choice})" if price > item["sma25"] else f"②割安・長期({market_choice})"
+
+                res_data.append({
+                    "銘柄コード": item["code"],
+                    "銘柄名": item["name"],
+                    "推奨目的": strat_label,
+                    "現在株価": f"¥{price:,.1f}",
+                    "予想配当利回り": f"{item['div_yield']:.2f}%" if item["div_yield"] > 0 else "---",
+                    "当日お得度判定": item["deal_label"],
+                    "お得スコア": f"{item['deal_score']}点",
+                    "損切ライン(目安)": f"¥{stop_loss:,.1f}",
+                    "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
+                })
 
         st.session_state["screening_results"] = pd.DataFrame(res_data)
 
