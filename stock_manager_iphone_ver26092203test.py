@@ -1035,11 +1035,16 @@ with tab1:
 
         res_data = []
         
-        with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini AI で詳細分析中..."):
-            # ① スイング上位5銘柄のAI解析
+        with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini 1.5 Flash ＆ Pro でマルチ診断中..."):
+            # ① スイング上位5銘柄のダブルAI解析
             for item in swing_top:
                 ai_res = analyze_top_stock_with_gemini_multi(item, "スイングトレード", api_key_input)
-                time.sleep(1)  # レートリミット回避
+                time.sleep(1)  # API制限回避
+
+                # ★ ai_res（辞書型）からコメント文字列を作成
+                flash_msg = ai_res.get("flash_comment", "")
+                pro_msg = ai_res.get("pro_comment", "")
+                ai_comment = f"【Flash】{flash_msg} / 【Pro】{pro_msg}"
 
                 price = item["price"]
                 stop_loss = min(price * 0.95, item["sma25"] * 0.98)
@@ -1052,6 +1057,32 @@ with tab1:
                     "予想配当利回り": f"{item['div_yield']:.2f}%" if item["div_yield"] > 0 else "---",
                     "当日お得度判定": item["swing_label"],
                     "お得スコア": f"{item['swing_score']}点",
+                    "損切ライン(目安)": f"¥{stop_loss:,.1f}",
+                    "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
+                })
+
+            # ② 割安・長期上位5銘柄のダブルAI解析
+            strat_name = "②高成長・長期" if market_choice == "グロース" else "②割安・配当長期"
+            for item in long_top:
+                ai_res = analyze_top_stock_with_gemini_multi(item, strat_name, api_key_input)
+                time.sleep(1)  # API制限回避
+
+                # ★ ai_res（辞書型）からコメント文字列を作成
+                flash_msg = ai_res.get("flash_comment", "")
+                pro_msg = ai_res.get("pro_comment", "")
+                ai_comment = f"【Flash】{flash_msg} / 【Pro】{pro_msg}"
+
+                price = item["price"]
+                stop_loss = price * 0.93
+
+                res_data.append({
+                    "銘柄コード": item["code"],
+                    "銘柄名": item["name"],
+                    "推奨目的": f"{strat_name}({market_choice})",
+                    "現在株価": f"¥{price:,.1f}",
+                    "予想配当利回り": f"{item['div_yield']:.2f}%" if item["div_yield"] > 0 else "---",
+                    "当日お得度判定": item["long_label"],
+                    "お得スコア": f"{item['long_score']}点",
                     "損切ライン(目安)": f"¥{stop_loss:,.1f}",
                     "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
                 })
