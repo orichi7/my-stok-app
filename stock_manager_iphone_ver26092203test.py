@@ -1038,7 +1038,7 @@ with tab1:
         with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini AI で詳細分析中..."):
             # ① スイング上位5銘柄のAI解析
             for item in swing_top:
-                ai_comment = analyze_top_stock_with_gemini(item, "スイングトレード", api_key_input)
+                ai_comment = analyze_top_stock_with_gemini_multi(item, "スイングトレード", api_key_input)
                 time.sleep(1)  # レートリミット回避
 
                 price = item["price"]
@@ -1059,7 +1059,7 @@ with tab1:
             # ② 割安・長期上位5銘柄のAI解析
             strat_name = "②高成長・長期" if market_choice == "グロース" else "②割安・配当長期"
             for item in long_top:
-                ai_comment = analyze_top_stock_with_gemini(item, strat_name, api_key_input)
+                ai_comment = analyze_top_stock_with_gemini_multi(item, strat_name, api_key_input)
                 time.sleep(1)  # レートリミット回避
 
                 price = item["price"]
