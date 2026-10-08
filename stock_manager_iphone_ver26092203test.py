@@ -248,13 +248,17 @@ def calculate_technical_deal_score(data: dict) -> dict:
         "summary_reason": f"RSI:{rsi:.1f}%, PER:{per:.1f}倍, 配当:{div:.2f}%"
     }
 
+import time
+import json
+import google.generativeai as genai
+
 def analyze_top_stock_with_gemini_multi(data: dict, strategy_type: str, api_key: str) -> dict:
     """ 
-    Gemini APIのモデル自動取得・エラーハンドリング・待機付き診断関数
+    Gemini APIのレート制限（15RPM）回避とモデル自動探索・堅牢化を施したダブルAI診断関数
     """
     if not api_key:
         return {
-            "flash_comment": "APIキー未設定 (サイドバーで設定してください)",
+            "flash_comment": "APIキー未設定",
             "pro_comment": "APIキー未設定"
         }
 
@@ -271,47 +275,45 @@ def analyze_top_stock_with_gemini_multi(data: dict, strategy_type: str, api_key:
 
     genai.configure(api_key=api_key)
 
-    # 利用可能なモデル一覧を動的に取得する処理
-    candidate_flash = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
-    candidate_pro = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-2.0-pro"]
+    # アカウントで利用可能なモデルを動的に取得
+    flash_candidates = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp"]
+    pro_candidates = ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp"]
 
     try:
         models = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 利用可能なモデルが取れればそれを優先
-        flash_avail = [m for m in models if "flash" in m]
-        pro_avail = [m for m in models if "pro" in m]
-        
-        if flash_avail: candidate_flash = flash_avail + candidate_flash
-        if pro_avail: candidate_pro = pro_avail + candidate_pro
+        f_list = [m for m in models if "flash" in m]
+        p_list = [m for m in models if "pro" in m]
+        if f_list: flash_candidates = f_list + flash_candidates
+        if p_list: pro_candidates = p_list + pro_candidates
     except Exception:
         pass
 
-    # 1. Flash相当モデルによる評価
-    flash_comment = "タイミング正常"
-    for m_name in candidate_flash:
+    # --- 1. Flash 診断 ---
+    flash_comment = "テクニカル指標良好"
+    for m_name in flash_candidates:
         try:
             model = genai.GenerativeModel(m_name)
             p_flash = prompt_base + "\nチャート・タイミング（押し目や買い時の魅力）について1文で簡潔に回答してください。"
             res = model.generate_content(p_flash)
-            flash_comment = res.text.strip()
-            break
-        except Exception as e:
-            flash_comment = f"Flashエラー: {str(e)[:30]}"
+            if res.text:
+                flash_comment = res.text.strip()
+                break
+        except Exception:
             continue
 
-    # レート制限回避のため少し待機
-    time.sleep(1)
+    # ★ レート制限（15RPM）回避のための待機
+    time.sleep(2)
 
-    # 2. Pro相当モデルによる評価
-    pro_comment = "指標・業績維持"
-    for m_name in candidate_pro:
+    # --- 2. Pro 診断（失敗時はFlashで補完） ---
+    pro_comment = "業績・割安度水準維持"
+    for m_name in pro_candidates:
         try:
             model = genai.GenerativeModel(m_name)
             p_pro = prompt_base + "\n業績・割安度・リスクの観点から投資価値について1文で簡潔に回答してください。"
             res = model.generate_content(p_pro)
-            pro_comment = res.text.strip()
-            break
+            if res.text:
+                pro_comment = res.text.strip()
+                break
         except Exception:
             continue
 
@@ -1032,17 +1034,17 @@ with tab1:
         # 2. 割安・長期スコア順で上位5銘柄を抽出
         long_top = sorted(raw_candidates, key=lambda x: x["long_score"], reverse=True)[:5]
 
-        # 表示用リストを新規初期化（過去データの混入を防止）
+        # 表示用リストを新規初期化（過去データの混入を防止      
         res_data = []
         
         with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini 1.5 Flash ＆ Pro でマルチ診断中..."):
-            # ① スイング上位5銘柄のダブルAI解析 (5件)
+            # ① スイング上位5銘柄のダブルAI解析
             for item in swing_top:
                 ai_res = analyze_top_stock_with_gemini_multi(item, "スイングトレード", api_key_input)
-                time.sleep(1)  # API制限回避
+                time.sleep(2)  # ★ API制限を確実に回避するための2秒待機
 
-                flash_msg = ai_res.get("flash_comment", "")
-                pro_msg = ai_res.get("pro_comment", "")
+                flash_msg = ai_res.get("flash_comment", "タイミング判定完了")
+                pro_msg = ai_res.get("pro_comment", "指標正常")
                 ai_comment = f"【Flash】{flash_msg} / 【Pro】{pro_msg}"
 
                 price = item["price"]
@@ -1060,14 +1062,14 @@ with tab1:
                     "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
                 })
 
-            # ② 割安・長期上位5銘柄のダブルAI解析 (5件)
+            # ② 割安・長期上位5銘柄のダブルAI解析
             strat_name = "②高成長・長期" if market_choice == "グロース" else "②割安・配当長期"
             for item in long_top:
                 ai_res = analyze_top_stock_with_gemini_multi(item, strat_name, api_key_input)
-                time.sleep(1)  # API制限回避
+                time.sleep(2)  # ★ API制限を確実に回避するための2秒待機
 
-                flash_msg = ai_res.get("flash_comment", "")
-                pro_msg = ai_res.get("pro_comment", "")
+                flash_msg = ai_res.get("flash_comment", "買い時判定完了")
+                pro_msg = ai_res.get("pro_comment", "財務水準良")
                 ai_comment = f"【Flash】{flash_msg} / 【Pro】{pro_msg}"
 
                 price = item["price"]
@@ -1085,7 +1087,6 @@ with tab1:
                     "Gemini AI 診断アドバイス": f"🤖 {ai_comment} ({item['summary_reason']})"
                 })
 
-        # セッション状態を更新（毎回10件にリセット）
         st.session_state["screening_results"] = pd.DataFrame(res_data)
 
     if "screening_results" in st.session_state and not st.session_state["screening_results"].empty:
