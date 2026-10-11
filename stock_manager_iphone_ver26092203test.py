@@ -254,7 +254,7 @@ import google.generativeai as genai
 
 def analyze_top_stock_with_gemini_multi(data: dict, strategy_type: str, api_key: str) -> dict:
     """ 
-    Gemini APIのレート制限（15RPM）回避とモデル自動探索・堅牢化を施したダブルAI診断関数
+    Gemini APIのモデル自動探索＆高速ダブルAI診断関数
     """
     if not api_key:
         return {
@@ -268,14 +268,13 @@ def analyze_top_stock_with_gemini_multi(data: dict, strategy_type: str, api_key:
 ・現在株価: ¥{data['price']:,.1f}
 ・25日移動平均乖離率: {data['deviation_rate']:+.1f}%
 ・RSI(14日): {data['rsi14']:.1f}%
-・PER: {data['per']:.1f}倍 | ROE: {data['roe']:.1f}%
+· PER: {data['per']:.1f}倍 | ROE: {data['roe']:.1f}%
 ・営業利益増益率: {data['earnings_growth']:+.1f}%
 ・予想配当利回り: {data['div_yield']:.2f}%
 """
 
     genai.configure(api_key=api_key)
 
-    # アカウントで利用可能なモデルを動的に取得
     flash_candidates = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp"]
     pro_candidates = ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp"]
 
@@ -301,10 +300,10 @@ def analyze_top_stock_with_gemini_multi(data: dict, strategy_type: str, api_key:
         except Exception:
             continue
 
-    # ★ レート制限（15RPM）回避のための待機
-    time.sleep(2)
+    # 処理速度向上のためウェイトを0.6秒に短縮
+    time.sleep(0.6)
 
-    # --- 2. Pro 診断（失敗時はFlashで補完） ---
+    # --- 2. Pro 診断 ---
     pro_comment = "業績・割安度水準維持"
     for m_name in pro_candidates:
         try:
@@ -999,7 +998,7 @@ with tab1:
         run_screening = st.button("🔍 当日お得株をスクリーニング実行", type="primary")
 
     if run_screening:
-        with st.spinner(f"【{market_choice}市場】売買代金上位銘柄を取得し、当日お得度を高速解析中..."):
+        with st.spinner(f"【{market_choice}市場】売買代金上位銘柄を取得し、高速解析中..."):
             target_items = get_top_stocks_by_trading_value(market_choice, top_n=25)
 
         raw_candidates = []
@@ -1025,23 +1024,17 @@ with tab1:
 
         my_bar.empty()
 
-        # --------------------------------------------------
-        # スイング上位5銘柄 ＆ 割安・長期上位5銘柄の厳密選出
-        # --------------------------------------------------
-        # 1. スイングスコア順で上位5銘柄を抽出
+        # スイング上位5銘柄 ＆ 割安・長期上位5銘柄の厳選出
         swing_top = sorted(raw_candidates, key=lambda x: x["swing_score"], reverse=True)[:5]
-        
-        # 2. 割安・長期スコア順で上位5銘柄を抽出
         long_top = sorted(raw_candidates, key=lambda x: x["long_score"], reverse=True)[:5]
 
-        # 表示用リストを新規初期化（過去データの混入を防止      
         res_data = []
         
         with st.spinner(f"選出された各5銘柄（計 {len(swing_top) + len(long_top)} 件）を Gemini 1.5 Flash ＆ Pro でマルチ診断中..."):
             # ① スイング上位5銘柄のダブルAI解析
             for item in swing_top:
                 ai_res = analyze_top_stock_with_gemini_multi(item, "スイングトレード", api_key_input)
-                time.sleep(2)  # ★ API制限を確実に回避するための2秒待機
+                time.sleep(0.6)  # 高速化対応の待機
 
                 flash_msg = ai_res.get("flash_comment", "タイミング判定完了")
                 pro_msg = ai_res.get("pro_comment", "指標正常")
@@ -1066,7 +1059,7 @@ with tab1:
             strat_name = "②高成長・長期" if market_choice == "グロース" else "②割安・配当長期"
             for item in long_top:
                 ai_res = analyze_top_stock_with_gemini_multi(item, strat_name, api_key_input)
-                time.sleep(2)  # ★ API制限を確実に回避するための2秒待機
+                time.sleep(0.6)  # 高速化対応の待機
 
                 flash_msg = ai_res.get("flash_comment", "買い時判定完了")
                 pro_msg = ai_res.get("pro_comment", "財務水準良")
@@ -1089,7 +1082,29 @@ with tab1:
 
         st.session_state["screening_results"] = pd.DataFrame(res_data)
 
+    # --------------------------------------------------
+    # スクリーニング結果表示 ＆ 「現在値の再取得」ボタン
+    # --------------------------------------------------
     if "screening_results" in st.session_state and not st.session_state["screening_results"].empty:
+        col_tbl, col_ref = st.columns([4, 1])
+        with col_ref:
+            st.write("")
+            if st.button("🔄 現在値を最新に更新"):
+                with st.spinner("表示中銘柄の最新株価を再取得中..."):
+                    df_current = st.session_state["screening_results"]
+                    updated_rows = []
+                    for _, row in df_current.iterrows():
+                        code = row["銘柄コード"]
+                        # 最新データを再取得
+                        fresh_data = fetch_stock_full_data(code)
+                        if fresh_data:
+                            new_price = fresh_data["price"]
+                            row["現在株価"] = f"¥{new_price:,.1f}"
+                            # 損切ライン等の再計算が必要な場合はここで更新
+                        updated_rows.append(row)
+                    st.session_state["screening_results"] = pd.DataFrame(updated_rows)
+                    st.rerun()
+
         st.dataframe(st.session_state["screening_results"], width="stretch")
 
     # 個別銘柄のリアルタイム詳細診断セクションの描画
