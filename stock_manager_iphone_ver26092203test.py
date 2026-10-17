@@ -379,7 +379,7 @@ def evaluate_stock_deal_with_gemini(data: dict, api_key: str) -> dict:
     }
 
 def render_gemini_diagnosis_section(api_key_input: str):
-    """ Gemini AI ニュース統合リアルタイム個別診断を描画・実行する関数 """
+    """ Gemini AI ニュース統合リアルタイム個別診断を描画・実行する関数（ファンダメンタルズ判定緩和・安定化版） """
     st.markdown("---")
     st.subheader("🤖 Gemini AI ニュース統合リアルタイム個別診断")
     
@@ -404,14 +404,23 @@ def render_gemini_diagnosis_section(api_key_input: str):
                 news_headlines = fetch_latest_stock_news(diag_code, stock_name)
                 ai_res = analyze_news_with_gemini(stock_name, news_headlines, api_key_input)
 
-                f_growth = data["earnings_growth"] >= 10.0
-                f_roe = data["roe"] >= 8.0
-                f_per = 0.0 < data["per"] <= 15.0
-                f_mcap = data["market_cap"] >= 100.0
-                fundamentals_pass = f_growth and f_roe and f_per and f_mcap
+                # --- ファンダメンタルズ判定の条件緩和・安定化 ---
+                per_val = data["per"]
+                roe_val = data["roe"]
+                growth_val = data["earnings_growth"]
+                mcap_val = data["market_cap"]
 
-                t_rsi = data["rsi14"] <= 40.0
-                t_dev = data["deviation_rate"] <= -10.0
+                # データが取得できない場合（0.0）や極端に悪くない場合は許容する柔軟な判定
+                f_per = (per_val == 0.0) or (0.0 < per_val <= 25.0)    # PER未取得または25倍以下
+                f_roe = (roe_val == 0.0) or (roe_val >= 5.0)          # ROE未取得または5%以上
+                f_growth = (growth_val == 0.0) or (growth_val >= -5.0) # 深刻なマイナス成長でなければOK
+                f_mcap = mcap_val >= 30.0                             # 時価総額30億円以上
+                
+                # 主要な条件を満たしているか判定
+                fundamentals_pass = f_mcap and (f_per or f_roe or f_growth)
+
+                t_rsi = data["rsi14"] <= 45.0
+                t_dev = data["deviation_rate"] <= -5.0
                 technical_pass = t_rsi and t_dev
 
                 sentiment_score = ai_res.get("sentiment_score", 0)
